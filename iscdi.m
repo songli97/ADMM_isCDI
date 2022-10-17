@@ -1,85 +1,90 @@
-%%
-%Matlab code for the paper 
-%%Li Song and Edmund Y. Lam, 
-%%¡°Fast and robust phase retrieval for masked coherent diffractive imaging,¡± 
-%%Photonics Research, vol. 10, no. 3, pp. 758¨C768, March 2022.
-%%
-%Load data
 clear;
 clc;
-load('exp_data_glioblastoma.mat'); % experiment data
-load('R_phs.mat'); %results from the baseline method
-%%
-%Imaging setup and mask construction
+tic
+load('exp_data_glioblastoma.mat');
+load('R_phs.mat');
 m = size(diff_pats,1);
-n1 = 231; % Reconstructed image size
-n2 = 231;
+
+x1 = 530; x2 = 760; y1 = 691; y2 = 921;n1 = 231;n2 = 231;
+%n1 = 231;n2 = 231;
 O = ones(m,m);
 
 cen = floor(size(diff_pats)./2)+1;
-params.ds_cen = [645, 806];
+params.ds_cen = [645, 806];%[cen(1)+10 cen(2)+125];
 params.size_crop = 140;
 ref_mask = single(ref_mask);
-M = supp-ref_mask;
+%M = supp-ref_mask;
 supp = single(supp);
-xpad = ref_mask;
-upad = probe.*(ref_mask);
-probe1 = probe(530:760,691:921); % (530:760,691:921):location of the mask
+upad = supp;
+uhpad = supp;
+probe1 = probe(530:760,691:921);
 supp1 = supp(530:760,691:921);
 params.mask = makeCircleMask(params.size_crop/2, size(diff_pats,1), params.ds_cen(1), params.ds_cen(2));
 %%
 %ADMM rec
-tol = 0.25;
 for index = 4:4:48
-rho = 1.0; gamma = 0.01; tau = 1.0; nn = m*m; %parameter
-x = zeros(n1,n2); phi = ones(m,m);l = zeros(m,m); mu = zeros(n1,n2); %init
-D = diff_pats(:,:,index);mupad = probe .* xpad; %aux variable
-y = (D+1); %since in D, -1 is the smallest, y is the variable o in the paper
-for i = 1:300
-    %for termination criteria calculation only
-    x_old = x;
-    xpad_old = xpad;
+D = diff_pats(:,:,index);y = D;
+rho = 1.0; gamma = 0.01; tau = 1.0; mupad = upad; ppad = upad .*probe; nn = m*m;
+u = rand(n1,n2); phi = ones(m,m);uh = zeros(n1,n1);l = -y; mu = zeros(n1,n2);
+
+Lap = make_laplacian(n1);
+mask_new = params.mask(x1:x2,y1:y2);
+
+gt = (crop_roi(abs(R(:,:,index).*params.mask), params.size_crop, params.ds_cen(2), params.ds_cen(1)));
+for i = 1:30
+    u_old = u;
+    upad_old = upad;
+    %L2-norm
     %u-update
-    u_rhs = rho*nn*((ifft2(ifftshift(y.*phi-l)))) + tau *(probe .* xpad - mupad);
-    u = 1/(tau+rho*nn) * u_rhs(530:760,691:921).*supp1;
-    upad(530:760,691:921) = u.*supp1;
+    uh_rhs = rho*nn*(ifft2(ifftshift(y.*phi-l)));
+    uh_rhs1 = conj(probe1).*uh_rhs(x1:x2,y1:y2) +tau*(u+mu);
+    uh = uh_rhs1./(tau * ones(n1,n2) + rho* nn * probe1 .* conj(probe1));
+    %max(max(abs(uh)))
+    uhpad(x1:x2,y1:y2) = uh;
     %phi-update
-    phi_hat = l+fftshift(fft2(upad));
+    phi_hat = l+fftshift(fft2(uhpad.*probe));
     mask = (y==0.0);
     phi = zeros(m,m)+ mask + (1-mask).*phi_hat./(y+mask);
     phi = phi ./ abs(phi);    
-    %x-update
-    x_hat = tau*conj(probe1).*(u+mu)./(gamma + tau * probe1 .* conj(probe1));
-    x = x_hat;
-    xpad(530:760,691:921) = x.*supp1;
+%     u-update
+%   u = tau/(gamma+tau)*(uh-mu);
+    urhs = fft2(tau*(uh-mu));
+    u = ifft2(urhs./(tau+gamma*(Lap)));
+%     u = u/(max(max(abs(u))));
+    upad(x1:x2,y1:y2) = u;
+    um = upad .* params.mask;
+%     urhs = fft2(um);
+%     um = ifft2(urhs./(1+1.0*(Lap)));
+    upad = upad .* (1-params.mask) + um;
+    u = upad(x1:x2,y1:y2);
     %dual variabe update
-    l = l + (fftshift(fft2(upad))-y.*phi);
-    mu = mu + u - probe1.* x;
-    mupad(530:760,691:921) = mu.*supp1;
-    if(norm(x(:)-x_old(:))/norm(x(:))<tol)
-        break;
-    end
+    l = l + fftshift(fft2(probe.*upad))-y.*phi;
+    history(index,i) = norm(u-u_old)/norm(u);
+    %history(index,i) = norm(abs(fftshift(fft2(probe.*upad)))-y);
+    mu = mu + u - uh;
+    mupad(x1:x2,y1:y2) = mu.*supp1;
+    norm(u-u_old)/norm(u)
+     if(norm(u-u_old)/norm(u)<0.1&&i>1)
+         break
+     end
 end
-ADMM(:,:,index) = xpad;
-end
-%toc
-%% Display result
-h1 = figure(1);
-for n = 1:12
-            subplot(3, 4, n)
-            reconstruction = crop_roi(angle(ADMM(:,:,n*4)).*params.mask, params.size_crop, params.ds_cen(2), params.ds_cen(1));
-            imagesc(flipud(reconstruction)); axis image off; colormap(hot);
-end
-sgtitle('Phase retrieval results from the ADMM method');
-h2 = figure(2);
 
-for n = 1:12
+ADMM(:,:,index/4) = upad;%./max(max(abs(upad)));
+end
+toc
+%% Display result
+for n = 1:size(ADMM, 3)
+            subplot(3, 4, n)
+            reconstruction = crop_roi(angle(ADMM(:,:,n)).*params.mask, params.size_crop, params.ds_cen(2), params.ds_cen(1));
+            imagesc(flipud(reconstruction)); axis image off
+end
+figure;
+for n = 1:size(ADMM, 3)%(1:12)*4%
+            %subplot(3, 4, n/4)
             subplot(3, 4, n)
             reconstruction = crop_roi(angle(R(:,:,n*4)).*params.mask, params.size_crop, params.ds_cen(2), params.ds_cen(1));
-            imagesc(flipud(reconstruction)); axis image off; colormap(hot);
+            imagesc(flipud(reconstruction)); axis image off
 end
-sgtitle('Phase retrieval results from the baseline method');
-
 function [cropped_im] = crop_roi(image, crop_size,centrex,centrey)
 % Crop an image to a specified crop_size, centered around centrex, centrey
 %   Inputs: 
